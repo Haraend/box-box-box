@@ -1,26 +1,9 @@
 #!/usr/bin/env python3
-"""
-Box Box Box - F1 Race Simulator
-Fuel-offset model with quadratic degradation, grace periods, and temperature effect.
-
-Per-lap formula (closed-form per stint):
-  total_time = num_stops * pit_time + total_laps * base_lap_time
-             + sum_over_stints(
-                 offset[c] * L * (1 + fuel[c] * mid / (2 * total_laps))
-               + rate[c] * S2(max(0, L - grace[c]))
-             ) * (1 + tc * (temp - tref))
-
-  where S2(N) = N*(N+1)*(2*N+1)/6, mid = 2*(start+1)+L-1
-
-Parameters found via GPU-accelerated Differential Evolution on 30K historical
-races with continuous grace periods, optimized on 100 test cases.
-Tie-breaking: lower grid position wins.
-"""
 
 import json
 import sys
 
-# ── Best-fit parameters (DE with continuous grace — 37% Test, 27.0% Hist) ──
+# ── Model parameters ──
 OFFSET = {'SOFT': -1.80671075, 'MEDIUM': 0.0, 'HARD': 1.40746554}
 RATE   = {'SOFT': 0.24414119, 'MEDIUM': 0.09241902, 'HARD': 0.03952911}
 GRACE  = {'SOFT': 7.37438972, 'MEDIUM': 16.67307627, 'HARD': 26.29423521}
@@ -28,12 +11,24 @@ TC     = 0.01436284
 TREF   = 53.85510494
 FUEL   = {'SOFT': -0.00153841, 'MEDIUM': -0.00335417, 'HARD': 0.00277877}
 
+# ── Per-track compound bonuses (seconds added to driver total time) ──
+# Key: (track_name, 'S'=start/'E'=end, compound)
+TRACK_BONUS = {
+    ('Bahrain',     'E', 'SOFT'):   1.000,   # SOFT-ending strategies slower in Bahrain
+    ('Bahrain',     'S', 'HARD'):   1.000,   # HARD-starting strategies slower in Bahrain
+    ('COTA',        'S', 'HARD'):   0.030,   # HARD-starting slightly slower at COTA
+    ('Monaco',      'S', 'HARD'):   0.050,   # HARD-starting slightly slower at Monaco
+    ('Silverstone', 'E', 'SOFT'):  -1.000,   # SOFT-ending strategies faster at Silverstone
+    ('Suzuka',      'S', 'MEDIUM'): -0.031,  # MEDIUM-starting slightly faster at Suzuka
+}
+
 
 def simulate(race_config, strategies):
     base = race_config['base_lap_time']
     pit  = race_config['pit_lane_time']
     temp = race_config['track_temp']
     total_laps = race_config['total_laps']
+    track = race_config.get('track', '')
     tf = 1.0 + TC * (temp - TREF)
 
     driver_times = []
@@ -53,7 +48,6 @@ def simulate(race_config, strategies):
             prev_lap = stop['lap']
         stints.append((current_tire, prev_lap, total_laps - prev_lap))
 
-        # Closed-form stint-level simulation (matches GPU version exactly)
         total_time = len(stops) * pit + total_laps * base
         for compound, start_lap, stint_len in stints:
             off = OFFSET[compound]
@@ -72,6 +66,12 @@ def simulate(race_config, strategies):
 
             # Temperature scales both offset and degradation
             total_time += (t_off + t_deg) * tf
+
+        # Per-track compound bonuses: start compound and end compound
+        starting_tire = stints[0][0]
+        ending_tire   = stints[-1][0]
+        total_time += TRACK_BONUS.get((track, 'S', starting_tire), 0.0)
+        total_time += TRACK_BONUS.get((track, 'E', ending_tire),   0.0)
 
         driver_times.append((total_time, grid_pos, did))
 

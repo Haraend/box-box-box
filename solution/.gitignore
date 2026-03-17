@@ -24,3 +24,6 @@
 # IDE files
 # .vscode/
 # .idea/
+# past/
+custom_data/*.parquet
+attempts/
